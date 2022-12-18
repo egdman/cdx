@@ -367,41 +367,56 @@ def no_preproc(tokens):
     else:
       yield t
 
+def collapse_parens(tokens):
+  for t in tokens:
+    if t == "(":
+      depth = 1
+      for t in tokens:
+        if t == "(":
+          depth += 1
+        elif t == ")":
+          depth -= 1
+          if depth == 0:
+            yield "(~~)"
+            break
+    else:
+      yield t
+
 
 def statement_split(tokens):
   def dispatch():
     if t == ";":
       back_buf.append(t)
       return semi
-    elif t == "{":
-      back_buf.append(t)
-      return open_curly
+    # elif t == "{":
+    #   back_buf.append(t)
+    #   return open_curly
     else:
       buf.append(t)
       return dispatch
 
-  def open_curly():
-    if t == "}":
-      back_buf.append(t)
-      return empty_curlies
-    else:
-      buf.extend(("{", t))
-      del back_buf[:]
-      return dispatch
+  # def open_curly():
+  #   if t == "}":
+  #     back_buf.append(t)
+  #     return empty_curlies
+  #   else:
+  #     buf.extend(("{", t))
+  #     del back_buf[:]
+  #     return dispatch
 
-  def empty_curlies():
-    del back_buf[:]
-    if t in (",", ")"): # this happens in ctor initializer lists
-      buf.extend(("{", "}", t))
-      return dispatch
-    elif t == ";":
-      buf.extend(("{", "}"))
-      back_buf.append(t)
-      return semi
-    else:
-      # empty function body is the end of a statement, even though there's no semicolon
-      buf.extend(("{", ";", "}", EndOfStatement, t))
-      return dispatch
+  # def empty_curlies():
+  #   del back_buf[:]
+  #   if t in (",", ")"): # this happens in ctor initializer lists
+  #     buf.extend(("{", "}", t))
+  #     return dispatch
+  #   elif t == ";":
+  #     buf.extend(("{", "}"))
+  #     back_buf.append(t)
+  #     return semi
+  #   else:
+  #     # empty function body is the end of a statement, even though there's no semicolon
+  #     buf.extend(("{", ";", "}", EndOfStatement, t))
+  #     return dispatch
 
   def semi():
     if t == "}":
@@ -450,8 +465,9 @@ def write_tokens(stream, tokens):
 
   def _unpack_complex_tokens():
     for t in tokens:
-      if is_a_temp_expr(t):
-        yield from t.tokens
+      if is_a_templ_ex(t):
+        yield t.tokens[0].word + "<~~>"
+        # yield from t.tokens
       else:
         yield t
 
@@ -466,7 +482,7 @@ def write_tokens(stream, tokens):
       else:
         stream.write(t)
       sep = ""
-    elif t in "),":
+    elif t in (")", ","):
       stream.write(t)
       sep = " "
     else:
@@ -654,7 +670,7 @@ def clean_func_decl(decl):
 # def split_func_decl(decl):
 #   decl = iter(decl)
 #   for t in decl:
-#     if is_a_temp_expr(t) and t.tokens[0].word == "template":
+#     if is_a_templ_ex(t) and t.tokens[0].word == "template":
 #       templ = t
 #       break
 #     else:
@@ -665,7 +681,7 @@ def clean_func_decl(decl):
 
 
 @dataclass(frozen=True)
-class TempExpr:
+class TemplEx:
   '''
   group of tokens representing a template expression,
   which includes 1 token before the < and everything until & including the closing >
@@ -673,8 +689,8 @@ class TempExpr:
   tokens: tuple
 
 
-def is_a_temp_expr(token):
-  return isinstance(token, TempExpr)
+def is_a_templ_ex(token):
+  return isinstance(token, TemplEx)
 
 
 def join_template_expressions(stmt):
@@ -700,8 +716,8 @@ def join_template_expressions(stmt):
           if depth == 0:
 #     ^
             if is_a_word(templ_preamble[0]):
-              templ_preamble = templ_preamble,
-              yield TempExpr((templ_preamble,) + tuple(templ))
+              templ_preamble, = templ_preamble
+              yield TemplEx((templ_preamble,) + tuple(templ))
 #     ^
               templ_preamble = []
               templ = []
@@ -729,8 +745,8 @@ def parse_statement(stmt, scope_stack: ScopeStack, line_ctx: TextReader):
         sc_kind = t.word
         sc_preamble = []
         for t in stmt:
-          if is_a_word(t) or is_a_temp_expr(t) or t in type_tokens:
-            if is_a_temp_expr(t):
+          if is_a_word(t) or is_a_templ_ex(t) or t in type_tokens:
+            if is_a_templ_ex(t):
               sc_preamble.extend(t.tokens)
             else:
               sc_preamble.append(t)
@@ -795,7 +811,7 @@ def parse_statement(stmt, scope_stack: ScopeStack, line_ctx: TextReader):
     elif t in type_tokens:
       paren_preamble.append(t)
 
-    elif is_a_temp_expr(t):
+    elif is_a_templ_ex(t):
       paren_preamble.extend(t.tokens)
 
 
@@ -849,19 +865,15 @@ if __name__ == "__main__":
         tokens = join_tokens(tokens)
         tokens = no_preproc(tokens)
         tokens = no_newlines(tokens)
+        tokens = collapse_parens(tokens)
+        tokens = join_template_expressions(tokens)
         tokens = statement_split(tokens)
-        # write_tokens(sys.stdout, tokens)
+        write_tokens(sys.stdout, tokens)
         # write_tokens(open('nul', 'w'), tokens)
 
-        functions = parse_functions(tokens, stream)
+        # functions = parse_functions(tokens, stream)
+        # write_functions(sys.stdout, functions, filename, cpp2=True)
 
-        # for t in functions:
-        #   if isinstance(t, TempExpr):
-        #     write_tokens(sys.stdout, t.tokens)
-        #     sys.stdout.write('\n')
-
-
-        write_functions(sys.stdout, functions, filename, cpp2=True)
         # print(f"all took {perf_counter() - t0}")
 
     except (FileNotFoundError, OSError):
