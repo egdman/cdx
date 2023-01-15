@@ -4,6 +4,7 @@ direc/*.h direc/*.hh direc/*.hpp direc/*.hxx direc/*.h++
 """
 
 from collections import deque
+from collections.abc import Iterator
 from dataclasses import dataclass, make_dataclass
 from itertools import chain
 import typing as ty
@@ -34,8 +35,9 @@ class WordToken:
   def __repr__(self):
     return f"W:{self.word}"
 
+Token = ty.Union[str, WordToken] # str represents all special tokens
 
-def is_a_word(token):
+def is_a_word(token: Token):
   return isinstance(token, WordToken)
 
 
@@ -85,7 +87,7 @@ class TextReader:
     return ch
 
 
-def tokenize(stream: TextReader):
+def tokenize(stream: TextReader) -> Iterator[Token]:
   def one_char():
     yield ch
 
@@ -117,7 +119,6 @@ def tokenize(stream: TextReader):
       for ch in stream:
         if ch == "*" and stream.peek(0) == "/":
           stream.discard()
-          # yield "\n" # must always replace comments with a newline
           break
     elif ch == "/": # inline comment
       stream.discard()
@@ -203,12 +204,12 @@ def tokenize(stream: TextReader):
     "/": slash_state,
     ">": angle_state(">"),
     "<": angle_state("<"),
-    "!": one_or_two_chars("!", "="),
-    "^": one_or_two_chars("^", "="),
+    "!": one_or_two_chars("!", "="), "!" "!="
+    "^": one_or_two_chars("^", "="), "^" "^="
     "+": one_or_two_chars("+", "+="),
-    "-": one_or_two_chars("-", "->="),
-    "=": one_or_two_chars("=", "="),
-    ":": one_or_two_chars(":", ":"),
+    "-": one_or_two_chars("-", "->="),  "-" "--" "->" "-="
+    "=": one_or_two_chars("=", "="),    "=" "=="
+    ":": one_or_two_chars(":", ":"),    ":" "::"
     "&": one_or_two_chars("&", "&="),
     "|": one_or_two_chars("|", "|="),
     "*": one_or_two_chars("*", "/="),
@@ -234,11 +235,11 @@ def tokenize(stream: TextReader):
     yield WordToken(word)
 
 
-def join_tokens(tokens):
+def join_tokens(tokens: Iterator[Token]) -> Iterator[Token]:
   numeric_suffixes = frozenset(("f", "l", "F", "L",
     "f16", "f32", "f64", "f128", "bf16","F16", "F32", "F64", "F128", "BF16"))
 
-  def is_a_number(word):
+  def is_lead_by_a_digit(word: str):
     ch = ord(word[0])
     return ord("0") <= ch <= ord("9")
 
@@ -246,7 +247,7 @@ def join_tokens(tokens):
     if is_a_word(t) and t.word == "operator":
       back_buf.append(t)
       return operator_keyword
-    elif is_a_word(t) and is_a_number(t.word):
+    elif is_a_word(t) and is_lead_by_a_digit(t.word):
       back_buf.append(t)
       return number_state
     elif t == ".":
@@ -261,7 +262,7 @@ def join_tokens(tokens):
       back_buf.append(".")
       return number_dot
 
-    elif is_a_word(t) and is_a_number(t.word):
+    elif is_a_word(t) and is_lead_by_a_digit(t.word):
       buf.extend(back_buf)
       del back_buf[:]
       back_buf.append(t)
@@ -274,7 +275,7 @@ def join_tokens(tokens):
       return dispatch
 
   def leading_dot():
-    if is_a_word(t) and is_a_number(t.word):
+    if is_a_word(t) and is_lead_by_a_digit(t.word):
       buf.append(WordToken("." + t.word))
     else:
       buf.extend((".", t))
@@ -283,7 +284,7 @@ def join_tokens(tokens):
     return dispatch
 
   def number_dot():
-    if is_a_word(t) and (is_a_number(t.word) or t.word in numeric_suffixes):
+    if is_a_word(t) and (is_lead_by_a_digit(t.word) or t.word in numeric_suffixes):
       buf.append(WordToken(back_buf[0].word + "." + t.word)) # x.y format
     else:
       buf.extend((WordToken(back_buf[0].word + "."), t)) # x. format
@@ -346,13 +347,7 @@ def join_tokens(tokens):
   yield from back_buf
 
 
-
-def no_newlines(tokens):
-  yield from (t for t in tokens if t != '\n')
-
-def no_preproc(tokens):
-  tokens = iter(tokens)
-
+def no_preproc(tokens: Iterator[Token]) -> Iterator[Token]:
   def preproc_state():
     for t in tokens:
       if t == "\n":
@@ -364,23 +359,24 @@ def no_preproc(tokens):
   for t in tokens:
     if t == "#":
       preproc_state()
-    else:
+    elif t != "\n":
       yield t
 
-def collapse_parens(tokens):
-  for t in tokens:
-    if t == "(":
-      depth = 1
-      for t in tokens:
-        if t == "(":
-          depth += 1
-        elif t == ")":
-          depth -= 1
-          if depth == 0:
-            yield "(~~)"
-            break
-    else:
-      yield t
+
+# def collapse_parens(tokens):
+#   for t in tokens:
+#     if t == "(":
+#       depth = 1
+#       for t in tokens:
+#         if t == "(":
+#           depth += 1
+#         elif t == ")":
+#           depth -= 1
+#           if depth == 0:
+#             yield "(~~)"
+#             break
+#     else:
+#       yield t
 
 
 def statement_split(tokens):
@@ -491,23 +487,56 @@ def write_tokens(stream, tokens):
       sep = "" if t in ("\\", "(") else " " # don't separate the backslash from the next char
 
 
+
+
+
+
+Expr = ...
+
 @dataclass(frozen=True)
-class FunctionDef:
+class ParenEx:
+  '''
+  A tuple of expressions representing a parenthesized expression, including
+  the opening and the closing parentheses.
+  '''
+  tokens: tuple[Expr]
+
+
+@dataclass(frozen=True)
+class TemplEx:
+  '''
+  A tuple of expressions representing a template expression,
+  which includes 1 token before the < and everything until & including the closing >.
+  '''
+  tokens: tuple[Expr]
+
+
+Expr = ty.Union[Token, TemplEx, ParenEx]
+
+def is_a_paren_ex(expr: Expr):
+  return isinstance(expr, ParenEx)
+
+def is_a_templ_ex(expr: Expr):
+  return isinstance(expr, TemplEx)
+
+
+@dataclass(frozen=True)
+class FunctionDecl:
   line_number: int
   name: WordToken
-  namespace: tuple
-  templ: tuple
-  args: tuple
-  rtype: tuple
+  namespace: tuple[Token]
+  templ: ty.Optional[TemplEx]
+  args: ParenEx
+  rtype: tuple[Token]
 
 
 @dataclass(frozen=True)
 class Scope:
   kind: WordToken
-  name: tuple
+  name: tuple[Token]
 
 
-class ScopeStack(list):
+class ScopeStack(list[Scope]):
   def __init__(self):
     super().__init__()
     self.in_function_body = False
@@ -530,7 +559,7 @@ class ScopeStack(list):
     self.in_function_body = False
     return ret
 
-  def iter_named_scopes(self):
+  def iter_named_scopes(self) -> Iterator[Scope]:
     for scope in self:
       if scope.kind in named_scope_kinds:
         yield scope
@@ -586,7 +615,7 @@ def join_scopes(scopes):
       yield get_class_name(scope.name)
 
 
-def write_function_cdef(stream, func_def: FunctionDef):
+def write_function_cdef(stream, func_def: FunctionDecl):
   if func_def.templ:
     write_tokens(stream, func_def.templ)
     stream.write("\n")
@@ -612,7 +641,7 @@ def write_function_cdef(stream, func_def: FunctionDef):
     stream.write(")")
 
 
-def write_function_cpp2(stream, func_def: FunctionDef):
+def write_function_cpp2(stream, func_def: FunctionDecl):
   if func_def.templ:
     write_tokens(stream, func_def.templ)
     stream.write("\n")
@@ -641,21 +670,21 @@ def write_functions(stream, func_defs, filename: str, cpp2=False):
     stream.write(";\n\n")
 
 
-def check_args(args):
-  if len(args) == 0:
-    return True
-  if len(args) == 1 and is_a_word(args[0]) and args[0].word == "void":
-    return True
+# def check_args(args):
+#   if len(args) == 0:
+#     return True
+#   if len(args) == 1 and is_a_word(args[0]) and args[0].word == "void":
+#     return True
 
-  arg = []
-  for t in args:
-    if is_a_word(t):
-      arg.append(t)
-    elif t == ",":
-      if len(arg) < 2:
-        return False
-      arg = []
-  return len(arg) != 1
+#   arg = []
+#   for t in args:
+#     if is_a_word(t):
+#       arg.append(t)
+#     elif t == ",":
+#       if len(arg) < 2:
+#         return False
+#       arg = []
+#   return len(arg) != 1
 
 
 def clean_func_decl(decl):
@@ -674,23 +703,7 @@ def clean_func_decl(decl):
 #       templ = t
 #       break
 #     else:
-
-
 #   for t in decl:
-
-
-
-@dataclass(frozen=True)
-class TemplEx:
-  '''
-  group of tokens representing a template expression,
-  which includes 1 token before the < and everything until & including the closing >
-  '''
-  tokens: tuple
-
-
-def is_a_templ_ex(token):
-  return isinstance(token, TemplEx)
 
 
 def join_template_expressions(stmt):
@@ -732,6 +745,10 @@ def join_template_expressions(stmt):
       templ_preamble = [t]
 
   yield from templ_preamble
+
+
+def make_expressions(tokens: Iterator[ty.Union[str, WordToken]], line_ctx: TextReader):
+  pass
 
 
 type_tokens = frozenset(("...", ",", "::", "*", "&", "&&", "[", "]", ":"))
@@ -790,7 +807,7 @@ def parse_statement(stmt, scope_stack: ScopeStack, line_ctx: TextReader):
 
             func_templ, func_rtype, func_scope, func_name = split_func_decl(func_decl)
             func_scope = tuple(chain(scope_stack.iter_named_scopes(), func_scope))
-            yield FunctionDef(
+            yield FunctionDecl(
               decl_line,
               func_name,
               func_scope,
@@ -864,8 +881,10 @@ if __name__ == "__main__":
         tokens = tokenize(stream)
         tokens = join_tokens(tokens)
         tokens = no_preproc(tokens)
-        tokens = no_newlines(tokens)
-        tokens = collapse_parens(tokens)
+
+        # tokens = make_expressions(tokens)
+
+        # tokens = collapse_parens(tokens)
         tokens = join_template_expressions(tokens)
         tokens = statement_split(tokens)
         write_tokens(sys.stdout, tokens)
