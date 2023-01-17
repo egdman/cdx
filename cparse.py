@@ -4,9 +4,9 @@ direc/*.h direc/*.hh direc/*.hpp direc/*.hxx direc/*.h++
 """
 
 from collections import deque
-from collections.abc import Iterator
+from collections.abc import Iterator, Iterable
 from dataclasses import dataclass, make_dataclass
-from itertools import chain
+from itertools import chain, takewhile
 import typing as ty
 
 def Symbol(name: str):
@@ -39,6 +39,36 @@ Token = ty.Union[str, WordToken] # str represents all special tokens
 
 def is_a_word(token: Token):
   return isinstance(token, WordToken)
+
+
+Expr = ...
+
+@dataclass(frozen=True)
+class ParenEx:
+  '''
+  A tuple of expressions representing a parenthesized expression, including
+  the opening and the closing parentheses.
+  '''
+  tokens: tuple[Expr]
+
+
+@dataclass(frozen=True)
+class TemplEx:
+  '''
+  A tuple of expressions representing a template expression,
+  which includes 1 token before the < and everything until & including the closing >.
+  '''
+  tokens: tuple[Expr]
+
+
+Expr = ty.Union[Token, TemplEx, ParenEx]
+
+def is_a_paren_ex(expr: Expr):
+  return isinstance(expr, ParenEx)
+
+def is_a_templ_ex(expr: Expr):
+  return isinstance(expr, TemplEx)
+
 
 
 class TextReader:
@@ -235,7 +265,25 @@ def tokenize(stream: TextReader) -> Iterator[Token]:
     yield WordToken(word)
 
 
-def join_tokens(tokens: Iterator[Token]) -> Iterator[Token]:
+# TODO: see if can put no_preproc directly into tokenize
+def no_preproc(tokens: Iterator[Token]) -> Iterator[Token]:
+  def preproc_state():
+    for t in tokens:
+      if t == "\n":
+        return
+      elif t == "\\":
+        for t in tokens:
+          break
+
+  for t in tokens:
+    if t == "#":
+      preproc_state()
+    elif t != "\n":
+      yield t
+
+
+# TODO: see if can put join_tokens directly into make_expressions
+def join_tokens(tokens: Iterator[Token]) -> Iterator[Expr]:
   numeric_suffixes = frozenset(("f", "l", "F", "L",
     "f16", "f32", "f64", "f128", "bf16","F16", "F32", "F64", "F128", "BF16"))
 
@@ -347,367 +395,6 @@ def join_tokens(tokens: Iterator[Token]) -> Iterator[Token]:
   yield from back_buf
 
 
-def no_preproc(tokens: Iterator[Token]) -> Iterator[Token]:
-  def preproc_state():
-    for t in tokens:
-      if t == "\n":
-        return
-      elif t == "\\":
-        for t in tokens:
-          break
-
-  for t in tokens:
-    if t == "#":
-      preproc_state()
-    elif t != "\n":
-      yield t
-
-
-# def collapse_parens(tokens):
-#   for t in tokens:
-#     if t == "(":
-#       depth = 1
-#       for t in tokens:
-#         if t == "(":
-#           depth += 1
-#         elif t == ")":
-#           depth -= 1
-#           if depth == 0:
-#             yield "(~~)"
-#             break
-#     else:
-#       yield t
-
-
-def statement_split(tokens):
-  def dispatch():
-    if t == ";":
-      back_buf.append(t)
-      return semi
-    # elif t == "{":
-    #   back_buf.append(t)
-    #   return open_curly
-    else:
-      buf.append(t)
-      return dispatch
-
-  # def open_curly():
-  #   if t == "}":
-  #     back_buf.append(t)
-  #     return empty_curlies
-  #   else:
-  #     buf.extend(("{", t))
-  #     del back_buf[:]
-  #     return dispatch
-
-  # def empty_curlies():
-  #   del back_buf[:]
-  #   if t in (",", ")"): # this happens in ctor initializer lists
-  #     buf.extend(("{", "}", t))
-  #     return dispatch
-  #   elif t == ";":
-  #     buf.extend(("{", "}"))
-  #     back_buf.append(t)
-  #     return semi
-  #   else:
-  #     # empty function body is the end of a statement, even though there's no semicolon
-  #     buf.extend(("{", ";", "}", EndOfStatement, t))
-  #     return dispatch
-
-  def semi():
-    if t == "}":
-      back_buf.append(t)
-      return semi_and_at_least_1_curly
-    elif t == ";":
-      buf.extend((";", EndOfStatement))
-      return semi
-    else:
-      buf.extend((";", EndOfStatement, t))
-      del back_buf[:]
-      return dispatch
-
-  def semi_and_at_least_1_curly():
-    # back_buf now contains one semi followed by one or more curlies
-    if t == "}":
-      back_buf.append(t)
-      return semi_and_at_least_1_curly
-
-    elif t == ";":
-      buf.extend(back_buf[:-1])
-      buf.extend((EndOfStatement, "}"))
-      del back_buf[1:] # now contains just 1 semi
-      return semi
-
-    else:
-      buf.extend(back_buf)
-      buf.extend((EndOfStatement, t))
-      del back_buf[:]
-      return dispatch
-
-  back_buf = []
-  buf = []
-  state = dispatch
-  for t in tokens:
-    state = state()
-    yield from buf
-    del buf[:]
-
-  yield from buf
-  yield from back_buf
-
-
-def write_tokens(stream, tokens):
-  sep = ""
-
-  def _unpack_complex_tokens():
-    for t in tokens:
-      if is_a_templ_ex(t):
-        yield t.tokens[0].word + "<~~>"
-      elif is_a_paren_ex(t):
-        yield "(~~)"
-      else:
-        yield t
-
-  for t in _unpack_complex_tokens():
-    if is_a_word(t):
-      stream.write(sep)
-      stream.write(str(t))
-      sep = " "
-    elif t in (EndOfStatement, ".", "'", "::"):
-      if t is EndOfStatement:
-        stream.write("\n")
-      else:
-        stream.write(t)
-      sep = ""
-    elif t in (")", ","):
-      stream.write(t)
-      sep = " "
-    else:
-      stream.write(sep)
-      stream.write(t)
-      sep = "" if t in ("\\", "(") else " " # don't separate the backslash from the next char
-
-
-
-
-
-
-Expr = ...
-
-@dataclass(frozen=True)
-class ParenEx:
-  '''
-  A tuple of expressions representing a parenthesized expression, including
-  the opening and the closing parentheses.
-  '''
-  tokens: tuple[Expr]
-
-
-@dataclass(frozen=True)
-class TemplEx:
-  '''
-  A tuple of expressions representing a template expression,
-  which includes 1 token before the < and everything until & including the closing >.
-  '''
-  tokens: tuple[Expr]
-
-
-Expr = ty.Union[Token, TemplEx, ParenEx]
-
-def is_a_paren_ex(expr: Expr):
-  return isinstance(expr, ParenEx)
-
-def is_a_templ_ex(expr: Expr):
-  return isinstance(expr, TemplEx)
-
-
-@dataclass(frozen=True)
-class FunctionDecl:
-  line_number: int
-  name: WordToken
-  namespace: tuple[Token]
-  templ: ty.Optional[TemplEx]
-  args: ParenEx
-  rtype: tuple[Token]
-
-
-@dataclass(frozen=True)
-class Scope:
-  kind: WordToken
-  name: tuple[Token]
-
-
-class ScopeStack(list[Scope]):
-  def __init__(self):
-    super().__init__()
-    self.in_function_body = False
-
-  def append(self, scope: Scope):
-    super().append(scope)
-    if scope.kind != "":
-      self.in_function_body = scope.kind == "function"
-
-  def pop(self) -> Scope:
-    if len(self) == 0:
-      return None
-
-    ret = super().pop()
-    for scope in reversed(self):
-      if scope.kind != "":
-        self.in_function_body = scope.kind == "function"
-        return ret
-
-    self.in_function_body = False
-    return ret
-
-  def iter_named_scopes(self) -> Iterator[Scope]:
-    for scope in self:
-      if scope.kind in named_scope_kinds:
-        yield scope
-
-
-# def template_state(tokens, scope_stack: ScopeStack):
-#   depth = 1
-#   for t in tokens:
-#     yield t
-#     if t == "<":
-#       depth += 1
-#     elif t in (">", ">>"):
-#       depth -= len(t)
-#     elif t == "{":
-#       scope_stack.append(Scope("", (), ()))
-#     elif t == "}":
-#       scope_stack.pop()
-
-#     if depth == 0:
-#       break
-
-
-# def get_class_name(decl):
-#   decl = iter(decl)
-#   clean_decl = []
-#   for t in decl:
-#     if t == "<":
-#       for _ in template_state(decl, ScopeStack()):
-#         pass
-#     elif t == ":": # stop at the inheritance list
-#       break
-#     else:
-#       clean_decl.append(t)
-
-#   if len(clean_decl) == 0:
-#     return ""
-#   elif clean_decl[-1] == "final":
-#     return clean_decl[-2] if len(clean_decl) > 1 else ""
-#   else:
-#     return clean_decl[-1]
-
-
-named_scope_kinds = frozenset(("namespace", "struct", "class"))
-def join_scopes(scopes):
-  scopes = iter(scopes)
-  for scope in scopes:
-    if scope.kind in named_scope_kinds:
-      yield get_class_name(scope.name)
-    break
-  for scope in scopes:
-    if scope.kind in named_scope_kinds:
-      yield "::"
-      yield get_class_name(scope.name)
-
-
-def write_function_cdef(stream, func_def: FunctionDecl):
-  if func_def.templ:
-    write_tokens(stream, func_def.templ)
-    stream.write("\n")
-
-  write_tokens(stream, join_scopes(func_def.namespace))
-  if func_def.namespace:
-    stream.write(":: ")
-
-  stream.write("cdef")
-
-  if func_def.rtype:
-    stream.write(f" {func_def.name}(")
-    write_tokens(stream, func_def.args)
-    stream.write("): ")
-    write_tokens(stream, func_def.rtype)
-
-  else:
-    if func_def.name.word.startswith("~"):
-      stream.write(f" destructor {func_def.name}(")
-    else:
-      stream.write(f" constructor {func_def.name}(")
-    write_tokens(stream, func_def.args)
-    stream.write(")")
-
-
-def write_function_cpp2(stream, func_def: FunctionDecl):
-  if func_def.templ:
-    write_tokens(stream, func_def.templ)
-    stream.write("\n")
-
-  write_tokens(stream, join_scopes(func_def.namespace))
-  if func_def.namespace:
-    stream.write("::")
-
-  stream.write(f"{func_def.name}: (")
-  write_tokens(stream, func_def.args)
-  if func_def.rtype:
-    stream.write(") -> ")
-    write_tokens(stream, func_def.rtype)
-  else:
-    stream.write(")")
-
-
-def write_functions(stream, func_defs, filename: str, cpp2=False):
-  for func_def in func_defs:
-    stream.write(f"// {filename}:{func_def.line_number}\n")
-    if cpp2:
-      write_function_cpp2(stream, func_def)
-    else:
-      write_function_cdef(stream, func_def)
-
-    stream.write(";\n\n")
-
-
-# def check_args(args):
-#   if len(args) == 0:
-#     return True
-#   if len(args) == 1 and is_a_word(args[0]) and args[0].word == "void":
-#     return True
-
-#   arg = []
-#   for t in args:
-#     if is_a_word(t):
-#       arg.append(t)
-#     elif t == ",":
-#       if len(arg) < 2:
-#         return False
-#       arg = []
-#   return len(arg) != 1
-
-
-def clean_func_decl(decl):
-  for t in decl:
-    if is_a_word(t):
-      if t.word not in ("public", "private", "protected"):
-        yield t
-    elif t != ":":
-      yield t
-
-
-# def split_func_decl(decl):
-#   decl = iter(decl)
-#   for t in decl:
-#     if is_a_templ_ex(t) and t.tokens[0].word == "template":
-#       templ = t
-#       break
-#     else:
-#   for t in decl:
-
-
-
 def make_expressions(tokens: Iterator[Token]) -> Iterator[Expr]:
   def dispatch(): # back_buf is empty
     if t == "(":
@@ -787,6 +474,179 @@ def make_expressions(tokens: Iterator[Token]) -> Iterator[Expr]:
   yield from buf
   yield from back_buf
 
+
+
+@dataclass(frozen=True)
+class FunctionDecl:
+  line_number: int
+  name: WordToken
+  namespace: tuple[Token]
+  templ: ty.Optional[TemplEx]
+  args: ParenEx
+  rtype: tuple[Token]
+
+
+@dataclass(frozen=True)
+class Scope:
+  kind: WordToken
+  name: tuple[Token]
+
+
+class ScopeStack(list[Scope]):
+  def __init__(self):
+    super().__init__()
+    self.in_function_body = False
+
+  def append(self, scope: Scope):
+    super().append(scope)
+    if scope.kind != "":
+      self.in_function_body = scope.kind == "function"
+
+  def pop(self) -> Scope:
+    if len(self) == 0:
+      return None
+
+    ret = super().pop()
+    for scope in reversed(self):
+      if scope.kind != "":
+        self.in_function_body = scope.kind == "function"
+        return ret
+
+    self.in_function_body = False
+    return ret
+
+  def iter_named_scopes(self) -> Iterator[Scope]:
+    for scope in self:
+      if scope.kind in named_scope_kinds:
+        yield scope
+
+
+
+
+
+def write_tokens(stream, tokens: Iterable[Token]):
+  sep = ""
+
+  def _unpack_complex_tokens():
+    for t in tokens:
+      if is_a_templ_ex(t):
+        yield t.tokens[0].word + "<~~>"
+      elif is_a_paren_ex(t):
+        yield "(~~)"
+      else:
+        yield t
+
+  for t in _unpack_complex_tokens():
+    if is_a_word(t):
+      stream.write(sep)
+      stream.write(str(t))
+      sep = " "
+    elif t in (EndOfStatement, ".", "'", "::"):
+      if t is EndOfStatement:
+        stream.write("\n")
+      else:
+        stream.write(t)
+      sep = ""
+    elif t in (")", ","):
+      stream.write(t)
+      sep = " "
+    else:
+      stream.write(sep)
+      stream.write(t)
+      sep = "" if t in ("\\", "(") else " " # don't separate the backslash from the next char
+
+
+
+
+
+
+named_scope_kinds = frozenset(("namespace", "struct", "class"))
+def join_scopes(scopes: Iterable[Scope]) -> Iterator[Expr]:
+
+  def _get_class_name(decl: Iterable[Expr]) -> Expr:
+    clean_decl = tuple(takewhile(decl, lambda t: t != ":")) # stop at the inheritance list
+
+    if len(clean_decl) == 0:
+      return ""
+    elif clean_decl[-1] == "final":
+      return clean_decl[-2] if len(clean_decl) > 1 else ""
+    else:
+      return clean_decl[-1]
+
+  scopes = iter(scopes)
+  for scope in scopes:
+    if scope.kind in named_scope_kinds:
+      yield _get_class_name(scope.name)
+    for scope in scopes:
+      if scope.kind in named_scope_kinds:
+        yield "::"
+        yield _get_class_name(scope.name)
+    break
+
+
+def write_function_cdef(stream, func_def: FunctionDecl):
+  if func_def.templ:
+    write_tokens(stream, func_def.templ)
+    stream.write("\n")
+
+  write_tokens(stream, join_scopes(func_def.namespace))
+  if func_def.namespace:
+    stream.write(":: ")
+
+  stream.write("cdef")
+
+  if func_def.rtype:
+    stream.write(f" {func_def.name}(")
+    write_tokens(stream, func_def.args)
+    stream.write("): ")
+    write_tokens(stream, func_def.rtype)
+
+  else:
+    if func_def.name.word.startswith("~"):
+      stream.write(f" destructor {func_def.name}(")
+    else:
+      stream.write(f" constructor {func_def.name}(")
+    write_tokens(stream, func_def.args)
+    stream.write(")")
+
+
+def write_function_cpp2(stream, func_def: FunctionDecl):
+  if func_def.templ:
+    write_tokens(stream, func_def.templ)
+    stream.write("\n")
+
+  write_tokens(stream, join_scopes(func_def.namespace))
+  if func_def.namespace:
+    stream.write("::")
+
+  stream.write(f"{func_def.name}: (")
+  write_tokens(stream, func_def.args)
+  if func_def.rtype:
+    stream.write(") -> ")
+    write_tokens(stream, func_def.rtype)
+  else:
+    stream.write(")")
+
+
+def write_functions(stream, func_defs, filename: str, cpp2=False):
+  for func_def in func_defs:
+    stream.write(f"// {filename}:{func_def.line_number}\n")
+    if cpp2:
+      write_function_cpp2(stream, func_def)
+    else:
+      write_function_cdef(stream, func_def)
+
+    stream.write(";\n\n")
+
+
+
+def clean_func_decl(decl):
+  for t in decl:
+    if is_a_word(t):
+      if t.word not in ("public", "private", "protected"):
+        yield t
+    elif t != ":":
+      yield t
 
 
 type_tokens = frozenset(("...", ",", "::", "*", "&", "&&", "[", "]", ":"))
@@ -891,6 +751,61 @@ def parse_functions(tokens, line_ctx: TextReader):
       break
 
 
+
+
+def statement_split(tokens):
+  def dispatch():
+    if t == ";":
+      back_buf.append(t)
+      return semi
+    else:
+      buf.append(t)
+      return dispatch
+
+  def semi():
+    if t == "}":
+      back_buf.append(t)
+      return semi_and_at_least_1_curly
+    elif t == ";":
+      buf.extend((";", EndOfStatement))
+      return semi
+    else:
+      buf.extend((";", EndOfStatement, t))
+      del back_buf[:]
+      return dispatch
+
+  def semi_and_at_least_1_curly():
+    # back_buf now contains one semi followed by one or more curlies
+    if t == "}":
+      back_buf.append(t)
+      return semi_and_at_least_1_curly
+
+    elif t == ";":
+      buf.extend(back_buf[:-1])
+      buf.extend((EndOfStatement, "}"))
+      del back_buf[1:] # now contains just 1 semi
+      return semi
+
+    else:
+      buf.extend(back_buf)
+      buf.extend((EndOfStatement, t))
+      del back_buf[:]
+      return dispatch
+
+  back_buf = []
+  buf = []
+  state = dispatch
+  for t in tokens:
+    state = state()
+    yield from buf
+    del buf[:]
+
+  yield from buf
+  yield from back_buf
+
+
+
+
 import sys
 import os
 from time import perf_counter
@@ -920,8 +835,6 @@ if __name__ == "__main__":
         tokens = join_tokens(tokens)
         tokens = no_preproc(tokens)
 
-
-        # tokens = collapse_parens(tokens)
         # tokens = join_template_expressions(tokens)
         # tokens = statement_split(tokens)
 
