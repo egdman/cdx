@@ -204,12 +204,12 @@ def tokenize(stream: TextReader) -> Iterator[Token]:
     "/": slash_state,
     ">": angle_state(">"),
     "<": angle_state("<"),
-    "!": one_or_two_chars("!", "="), "!" "!="
-    "^": one_or_two_chars("^", "="), "^" "^="
+    "!": one_or_two_chars("!", "="),
+    "^": one_or_two_chars("^", "="),
     "+": one_or_two_chars("+", "+="),
-    "-": one_or_two_chars("-", "->="),  "-" "--" "->" "-="
-    "=": one_or_two_chars("=", "="),    "=" "=="
-    ":": one_or_two_chars(":", ":"),    ":" "::"
+    "-": one_or_two_chars("-", "->="),
+    "=": one_or_two_chars("=", "="),
+    ":": one_or_two_chars(":", ":"),
     "&": one_or_two_chars("&", "&="),
     "|": one_or_two_chars("|", "|="),
     "*": one_or_two_chars("*", "/="),
@@ -463,7 +463,8 @@ def write_tokens(stream, tokens):
     for t in tokens:
       if is_a_templ_ex(t):
         yield t.tokens[0].word + "<~~>"
-        # yield from t.tokens
+      elif is_a_paren_ex(t):
+        yield "(~~)"
       else:
         yield t
 
@@ -565,41 +566,41 @@ class ScopeStack(list[Scope]):
         yield scope
 
 
-def template_state(tokens, scope_stack: ScopeStack):
-  depth = 1
-  for t in tokens:
-    yield t
-    if t == "<":
-      depth += 1
-    elif t in (">", ">>"):
-      depth -= len(t)
-    elif t == "{":
-      scope_stack.append(Scope("", (), ()))
-    elif t == "}":
-      scope_stack.pop()
+# def template_state(tokens, scope_stack: ScopeStack):
+#   depth = 1
+#   for t in tokens:
+#     yield t
+#     if t == "<":
+#       depth += 1
+#     elif t in (">", ">>"):
+#       depth -= len(t)
+#     elif t == "{":
+#       scope_stack.append(Scope("", (), ()))
+#     elif t == "}":
+#       scope_stack.pop()
 
-    if depth == 0:
-      break
+#     if depth == 0:
+#       break
 
 
-def get_class_name(decl):
-  decl = iter(decl)
-  clean_decl = []
-  for t in decl:
-    if t == "<":
-      for _ in template_state(decl, ScopeStack()):
-        pass
-    elif t == ":": # stop at the inheritance list
-      break
-    else:
-      clean_decl.append(t)
+# def get_class_name(decl):
+#   decl = iter(decl)
+#   clean_decl = []
+#   for t in decl:
+#     if t == "<":
+#       for _ in template_state(decl, ScopeStack()):
+#         pass
+#     elif t == ":": # stop at the inheritance list
+#       break
+#     else:
+#       clean_decl.append(t)
 
-  if len(clean_decl) == 0:
-    return ""
-  elif clean_decl[-1] == "final":
-    return clean_decl[-2] if len(clean_decl) > 1 else ""
-  else:
-    return clean_decl[-1]
+#   if len(clean_decl) == 0:
+#     return ""
+#   elif clean_decl[-1] == "final":
+#     return clean_decl[-2] if len(clean_decl) > 1 else ""
+#   else:
+#     return clean_decl[-1]
 
 
 named_scope_kinds = frozenset(("namespace", "struct", "class"))
@@ -706,49 +707,86 @@ def clean_func_decl(decl):
 #   for t in decl:
 
 
-def join_template_expressions(stmt):
-  templ_preamble = []
 
-  for t in stmt:
+def make_expressions(tokens: Iterator[Token]) -> Iterator[Expr]:
+  def dispatch(): # back_buf is empty
+    if t == "(":
+      back_buf.append(t)
+      return paren_state(1)
 
-    if t == "<":
-      if len(templ_preamble) == 0:
-        yield t
-        continue
-
-      templ = [t]
-      depth = 1
-      for t in stmt:
-#     ^
-        templ.append(t)
-        if t == "<":
-          depth += 1
-#     ^
-        elif t in (">", ">>"):
-          depth -= len(t)
-          if depth == 0:
-#     ^
-            if is_a_word(templ_preamble[0]):
-              templ_preamble, = templ_preamble
-              yield TemplEx((templ_preamble,) + tuple(templ))
-#     ^
-              templ_preamble = []
-              templ = []
-              break
-#     ^-------^
-
-      yield from templ_preamble
-      yield from templ
+    elif is_a_word(t):
+      back_buf.append(t)
+      return word_state
 
     else:
-      yield from templ_preamble
-      templ_preamble = [t]
+      buf.append(t)
+      return dispatch
 
-  yield from templ_preamble
+  def word_state(): # back_buf contains a single word token
+    if t == "<":
+      back_buf.append(t)
+      return template_state(1)
+    elif is_a_word(t):
+      buf.extend(back_buf)
+      del back_buf[:]
+      back_buf.append(t)
+      return word_state
+    elif t == "(":
+      buf.extend(back_buf)
+      del back_buf[:]
+      back_buf.append(t)
+      return paren_state(1)
+    else:
+      buf.extend(back_buf)
+      buf.append(t)
+      del back_buf[:]
+      return dispatch
 
+  def paren_state(depth): # back_buf contains a '(' and 0 or more additional tokens 
+    def _impl():
+      back_buf.append(t)
 
-def make_expressions(tokens: Iterator[ty.Union[str, WordToken]], line_ctx: TextReader):
-  pass
+      if t == "(":
+        return paren_state(depth + 1)
+      elif t == ")":
+        if depth > 1:
+          return paren_state(depth - 1)
+
+        buf.append(ParenEx(tuple(back_buf)))
+        del back_buf[:]
+        return dispatch
+      else:
+        return _impl
+    return _impl
+
+  def template_state(depth): # back_buf contains a word token, a '<', and 0 or more additional tokens
+    def _impl():
+      back_buf.append(t)
+
+      if t == "<":
+        return template_state(depth + 1)
+      elif t in (">", ">>"):
+        if depth > len(t):
+          return template_state(depth - len(t))
+
+        buf.append(TemplEx(tuple(back_buf)))
+        del back_buf[:]
+        return dispatch
+      else:
+        return _impl
+    return _impl
+
+  back_buf = []
+  buf = []
+  state = dispatch
+  for t in tokens:
+    state = state()
+    yield from buf
+    del buf[:]
+
+  yield from buf
+  yield from back_buf
+
 
 
 type_tokens = frozenset(("...", ",", "::", "*", "&", "&&", "[", "]", ":"))
@@ -882,11 +920,13 @@ if __name__ == "__main__":
         tokens = join_tokens(tokens)
         tokens = no_preproc(tokens)
 
-        # tokens = make_expressions(tokens)
 
         # tokens = collapse_parens(tokens)
-        tokens = join_template_expressions(tokens)
-        tokens = statement_split(tokens)
+        # tokens = join_template_expressions(tokens)
+        # tokens = statement_split(tokens)
+
+
+        tokens = make_expressions(tokens)
         write_tokens(sys.stdout, tokens)
         # write_tokens(open('nul', 'w'), tokens)
 
